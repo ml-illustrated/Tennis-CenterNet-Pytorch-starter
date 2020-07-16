@@ -1,0 +1,17 @@
+ckpt/
+data/
+logs/
+*__pycache__*
+#*/build/*
+#*/dist/
+*.so
+*.swp
+*~
+lib/cocoapi/PythonAPI/build/
+lib/cocoapi/PythonAPI/dist/
+nets/pretrained.mobilenetv3
+debug_captures
+*.mlmodel
+
+trained_models
+notes
