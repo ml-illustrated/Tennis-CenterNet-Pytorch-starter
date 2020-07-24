@@ -246,7 +246,7 @@ if __name__ == '__main__':
 
 
   net = get_pose_net(num_layers=18, head_conv=64)
-  print(net)
+  # print(net)
 
   for m in net.modules():
     if isinstance(m, nn.Conv2d):
@@ -254,3 +254,12 @@ if __name__ == '__main__':
 
   y = net(torch.randn(2, 3, 384, 384))
   # print(y.size())
+
+  device='cpu'
+
+  input_shape = (3,384,384)
+  net = net.to(device)
+  from torchsummary import summary
+  summary( net, input_shape )
+
+  

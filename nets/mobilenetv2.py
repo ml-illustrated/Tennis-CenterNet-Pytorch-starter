@@ -1,10 +1,6 @@
 import torch
 from torch import nn
 from types import MethodType
-# from .utils import load_state_dict_from_url, BN_MOMENTUM
-
-# from nets.layers import TemporalShift, TemporalShiftV2
-#from nets.layers import TemporalShift, TemporalShiftRight, TemporalShiftSingleBatch, TemporalShiftV2, TemporalShiftV2SingleBatch, AddBatch, RemoveBatch, ConvUpBlock, TemporalShiftRightSingleBatch, TemporalShiftRight2, TemporalShiftRight2SingleBatch
 
 try:
     from torch.hub import load_state_dict_from_url
@@ -100,13 +96,11 @@ class MobileNetV2(nn.Module):
             inverted_residual_setting=None,
             round_nearest=8,
             block=None,
-            tsm_mode=None,
             export_mode=False,
             deconv_size=None, # defaults to same width as head_conv
     ):
 
         self.deconv_with_bias = False
-        self.tsm_mode = tsm_mode
         self.export_mode=export_mode
     
         """
@@ -162,59 +156,6 @@ class MobileNetV2(nn.Module):
         # make it nn.Sequential
         self.features = nn.Sequential(*features)
         self.inplanes = input_channel
-
-        if self.tsm_mode:
-            new_forward = None
-            if export_mode:
-                if tsm_mode == 'v2':
-                    block = TemporalShiftV2SingleBatch
-                elif tsm_mode == 'right':
-                    block = TemporalShiftRightSingleBatch
-                    def new_forward( self, x, prev_shift_out ):
-                        x, slice_shift_out = self.shift_layer( x, prev_shift_out )
-                        return x + self.conv(x), slice_shift_out
-                elif tsm_mode == 'right2':
-                    block = TemporalShiftRight2SingleBatch
-                    def new_forward( self, x, prev_shift_out_x2 ):
-                        x, slice_shift_out_x2 = self.shift_layer( x, prev_shift_out_x2 )
-                        return x + self.conv(x), slice_shift_out_x2
-                elif tsm_mode == 'orig':
-                    block = TemporalShiftSingleBatch
-                else:
-                    assert False, 'Unknown TSM mode!'
-            else:
-                if tsm_mode == 'v2':
-                    block = TemporalShiftV2
-                elif tsm_mode == 'right':
-                    block = TemporalShiftRight
-                elif tsm_mode == 'right2':
-                    block = TemporalShiftRight2
-                elif tsm_mode == 'orig':
-                    block = TemporalShift
-                else:
-                    assert False, 'Unknown TSM mode!'
-                    
-            if new_forward == None:
-                def new_forward( self, x):
-                    # print( 'new_forward: ', x.shape )
-                    x = self.shift_layer( x )
-                    return x + self.conv(x)
-                    
-            layer_idx=0
-            for m in self.features:
-                if isinstance(m, InvertedResidual) and m.has_point_wise and m.identity:
-                    print('Adding temporal shift... idx {} conv[0] {}'.format(layer_idx, m.conv[0][0].in_channels ))
-                    fold = m.conv[0][0].in_channels//8
-                    m.shift_layer = block( fold=fold )
-                    m.forward = MethodType( new_forward, m )
-                    '''
-                    if block in ( TemporalShiftRightSingleBatch, TemporalShiftRight2SingleBatch ):
-                        m.shift_layer = block( fold=fold )
-                        m.forward = MethodType( new_forward, m )
-                    else:
-                        m.conv[0] = block(m.conv[0], fold=fold)
-                    '''
-                layer_idx+=1
 
         deconv_layer_channels = deconv_size if deconv_size else head_conv # default to use same size as head_conv
         self.deconv_layers = self._make_deconv_layer(
@@ -310,17 +251,13 @@ class MobileNetV2(nn.Module):
             'ERROR: num_deconv_layers is different len(num_deconv_filters)'
 
         layers = []
-        layer__up_size = [ (24, 24), (48, 48), (96, 96) ]
         for i in range(num_layers):
             kernel, padding, output_padding = \
                 self._get_deconv_cfg(num_kernels[i], i)
             # print( 'deconv ', i, num_kernels[i], num_filters[i], kernel, padding, output_padding ) #  deconv  0 4 64 4 1 0
 
             planes = num_filters[i]
-            if False: # REVERT TO ORIGINAL ConvTranspose2d TESTING ConvUpBlock
-                # layers.append( ConvUpBlock( self.inplanes, planes ) )
-                layers.append( ConvUpBlock( self.inplanes, planes, layer__up_size[i], export_mode=self.export_mode ) )
-            else:
+            if True:
                 layers.append(
                     nn.ConvTranspose2d(
                         in_channels=self.inplanes,
@@ -343,9 +280,6 @@ class MobileNetV2(nn.Module):
         x = self.features(x)
         # features:  torch.Size([16, 320, 13, 13]) # w/ 16 images input
 
-        # print( 'add_batch: ', x.shape )
-        # add_batch:  torch.Size([2, 320, 8, 13, 13]) # w/ 16 images input
-        
         x = self.deconv_layers(x)
         # print( 'deconv: ', x.shape )
         # deconv:  torch.Size([2, 24, 8, 104, 104]) # w/ 16 images input
@@ -355,20 +289,11 @@ class MobileNetV2(nn.Module):
         # print( 'OUT: ', out[0].shape, out[1].shape, out[2].shape ) 
         # w/ 2 batches: torch.Size([2, 3, 8, 104, 104]) torch.Size([2, 2, 8, 104, 104]) torch.Size([2, 2, 8, 104, 104])
 
-        # !! REVERT to ORIGINAL return out
         return [out]
         
     def forward(self, x):
         return self._forward_impl(x)
 
-
-    
-
-'''
-def mobilenet_v2(pretrained=False, progress=True, **kwargs):
-    model = MobileNetV2(**kwargs)
-    return model
-'''
 
 def get_mobilenetv2(num_classes,width_mult=1.0, head_conv=24, pretrained=True, export_mode=False, deconv_size=None):
     arch = 'mobilenet_v2'
@@ -376,82 +301,6 @@ def get_mobilenetv2(num_classes,width_mult=1.0, head_conv=24, pretrained=True, e
     model = MobileNetV2( num_classes=num_classes, width_mult=width_mult, head_conv=head_conv, export_mode=export_mode, deconv_size=deconv_size )
     model.init_weights(arch, pretrained=pretrained)
     return model
-
-
-def get_mobilenetv2_tsm(num_classes,width_mult=1.0, head_conv=24, pretrained=True, export_mode=False, deconv_size=None ):
-    arch = 'mobilenet_v2'
-    # model = mobilenet_v2( heads=heads, head_conv=head_conv)
-    model = MobileNetV2( num_classes=num_classes, width_mult=width_mult, head_conv=head_conv, tsm_mode='orig', export_mode=export_mode, deconv_size=deconv_size )
-    model.init_weights(arch, pretrained=pretrained)
-    return model
-
-
-def get_mobilenetv2_tsmv2(num_classes,width_mult=1.0, head_conv=24, pretrained=True, export_mode=False, deconv_size=None):
-    arch = 'mobilenet_v2'
-    model = MobileNetV2( num_classes=num_classes, width_mult=width_mult, head_conv=head_conv, tsm_mode='v2', export_mode=export_mode )
-    model.init_weights(arch, pretrained=pretrained)
-    return model
-
-def get_mobilenetv2_tsmright(num_classes,width_mult=1.0, head_conv=24, pretrained=True, export_mode=False, deconv_size=None):
-    arch = 'mobilenet_v2'
-    model = MobileNetV2( num_classes=num_classes, width_mult=width_mult, head_conv=head_conv, tsm_mode='right', export_mode=export_mode, deconv_size=deconv_size )
-    model.init_weights(arch, pretrained=pretrained)
-    return model
-
-def get_mobilenetv2_tsmright2(num_classes,width_mult=1.0, head_conv=24, pretrained=True, export_mode=False, deconv_size=None):
-    arch = 'mobilenet_v2'
-    model = MobileNetV2( num_classes=num_classes, width_mult=width_mult, head_conv=head_conv, tsm_mode='right2', export_mode=export_mode, deconv_size=deconv_size )
-    model.init_weights(arch, pretrained=pretrained)
-    return model
-
-
-def get_mobilenetv2_tsmright_for_export(num_classes, *args, **kwargs):
-    return get_mobilenetv2_tsm_with_shift_for_export(tsm_mode='right', num_classes=num_classes, *args, **kwargs )
-
-def get_mobilenetv2_tsmright2_for_export(num_classes, *args, **kwargs):
-    return get_mobilenetv2_tsm_with_shift_for_export(tsm_mode='right2', num_classes=num_classes, *args, **kwargs )
-
-
-def get_mobilenetv2_tsm_with_shift_for_export( tsm_mode, num_classes, width_mult=1.0, head_conv=24, pretrained=True, export_mode=True, deconv_size=None):
-    
-    from types import MethodType
-    arch = 'mobilenet_v2'
-    
-    model = MobileNetV2( num_classes=num_classes, width_mult=width_mult, head_conv=head_conv, tsm_mode=tsm_mode, export_mode=export_mode, deconv_size=deconv_size )
-
-    shift_width = 2 if tsm_mode=='right2' else 1
-    shift_buffers = [torch.zeros([1, shift_width*3, 96, 96]),
-		    torch.zeros([1, shift_width*4, 48, 48]),
-                    torch.zeros([1, shift_width*4, 48, 48]),
-                    torch.zeros([1, shift_width*8, 24, 24]),
-                    torch.zeros([1, shift_width*8, 24, 24]),
-                    torch.zeros([1, shift_width*8, 24, 24]),
-                    torch.zeros([1, shift_width*12, 24, 24]),
-                    torch.zeros([1, shift_width*12, 24, 24]),
-	            torch.zeros([1, shift_width*20, 12, 12]),
-                    torch.zeros([1, shift_width*20, 12, 12])]
-    
-    def new_forward(self, x, *shift_buffers):
-        
-        shift_buffer_idx = 0
-        out_buffer = []
-        for f in self.features:
-            if hasattr(f, 'shift_layer'): # isinstance(f, TemporalShiftRightSingleBatch):
-                x, shift_out = f(x, shift_buffers[shift_buffer_idx])
-                shift_buffer_idx += 1
-                out_buffer.append(shift_out)
-            else:
-                x = f(x)
-        
-        x = self.deconv_layers(x)
-
-        out = [self.hmap(x), self.regs(x), self.w_h_(x)] + out_buffer
-        
-        return out
-
-    model.forward = MethodType(new_forward, model)
-    
-    return model, shift_buffers
 
 
 if __name__ == '__main__':
@@ -463,20 +312,12 @@ if __name__ == '__main__':
     num_classes = 3
     input_shape = (16,3,384,384)
 
-    # model = get_mobilenetv2_tsm( num_classes )
-    # model = get_mobilenetv2( num_classes )
-    # model = get_mobilenetv2_tsmright( num_classes )
-    # model, shift_buffers = get_mobilenetv2_tsmright_for_export(num_classes)
-    model, shift_buffers = get_mobilenetv2_tsmright2_for_export(num_classes)
-    input_shape = (1,3,384,384)
+    model = get_mobilenetv2(num_classes)
+    input_shape = (3,384,384)
     # print( model )
 
     model = model.to(device)
-    # from torchsummary import summary
-    # summary( model, input_shape )
+    from torchsummary import summary
+    summary( model, input_shape )
 
-    input = torch.zeros( input_shape )
-    outputs = model(input.to(device), *shift_buffers)
-    for o in outputs:
-        print( 'output: ', o.shape )
 
